@@ -5,70 +5,74 @@ import folium
 from streamlit_folium import st_folium
 import zipfile
 import os
-import tempfile
+import shutil
 
 st.set_page_config(layout="wide")
 st.title("🗺️ Visualizador Interativo de Arquivos Geográficos")
-st.write("Envie um arquivo `.zip` (shapefile) ou `.geojson`, `.json`, `.csv` com coordenadas.")
 
-uploaded_file = st.file_uploader(
-    "Arraste e solte o arquivo aqui",
-    type=["zip", "geojson", "json", "csv"]
-)
+# Função para carregar diferentes tipos de arquivos
+def carregar_arquivo(uploaded_file):
+    filename = uploaded_file.name.lower()
 
-def carregar_geodf(file):
-    ext = os.path.splitext(file.name)[-1].lower()
+    # Criar pasta temporária
+    temp_dir = "temp_data"
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir, exist_ok=True)
 
-    if ext == ".zip":
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, "shapefile.zip")
-            with open(zip_path, "wb") as f:
-                f.write(file.read())
-            with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                zip_ref.extractall(tmpdir)
-
-            shp_files = [f for f in os.listdir(tmpdir) if f.endswith(".shp")]
-            if not shp_files:
-                st.error("Nenhum arquivo .shp encontrado no .zip.")
-                return None
-            gdf = gpd.read_file(os.path.join(tmpdir, shp_files[0]))
-    elif ext in [".geojson", ".json"]:
-        gdf = gpd.read_file(file)
-    elif ext == ".csv":
-        df = pd.read_csv(file)
-        if not {"latitude", "longitude"}.issubset(df.columns):
-            st.error("O CSV deve conter colunas 'latitude' e 'longitude'.")
+    # ZIP (Shapefile)
+    if filename.endswith(".zip"):
+        with open(os.path.join(temp_dir, "file.zip"), "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        with zipfile.ZipFile(os.path.join(temp_dir, "file.zip"), "r") as zip_ref:
+            zip_ref.extractall(temp_dir)
+        shp_files = [f for f in os.listdir(temp_dir) if f.endswith(".shp")]
+        if not shp_files:
+            st.error("Nenhum arquivo .shp encontrado no .zip.")
             return None
-        gdf = gpd.GeoDataFrame(
-            df,
-            geometry=gpd.points_from_xy(df.longitude, df.latitude),
-            crs="EPSG:4326"
-        )
+        return gpd.read_file(os.path.join(temp_dir, shp_files[0]))
+
+    # GeoJSON ou JSON
+    elif filename.endswith(".geojson") or filename.endswith(".json"):
+        return gpd.read_file(uploaded_file)
+
+    # CSV com lat/lon
+    elif filename.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+        if not {'latitude', 'longitude'}.issubset(df.columns):
+            st.error("O CSV precisa ter colunas 'latitude' e 'longitude'.")
+            return None
+        return gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.longitude, df.latitude), crs="EPSG:4326")
+
     else:
         st.error("Formato de arquivo não suportado.")
         return None
 
-    # Corrige para WGS84
-    if gdf.crs != "EPSG:4326":
-        gdf = gdf.to_crs("EPSG:4326")
-
-    # Converte colunas de data para string
-    for col in gdf.columns:
-        if pd.api.types.is_datetime64_any_dtype(gdf[col]):
-            gdf[col] = gdf[col].astype(str)
-
-    return gdf
-
+# Upload do arquivo
+uploaded_file = st.file_uploader("Envie um arquivo (.zip, .geojson, .json ou .csv com lat/lon)", type=["zip", "geojson", "json", "csv"])
 
 if uploaded_file:
-    gdf = carregar_geodf(uploaded_file)
-    if gdf is not None:
-        try:
-            centro = gdf.geometry.centroid.unary_union.centroid
-            m = folium.Map(location=[centro.y, centro.x], zoom_start=12)
-            folium.GeoJson(gdf, name="Camada").add_to(m)
+    try:
+        gdf = carregar_arquivo(uploaded_file)
+        if gdf is not None:
+            if gdf.crs != "EPSG:4326":
+                gdf = gdf.to_crs("EPSG:4326")
+
+            centro = gdf.geometry.unary_union.centroid
+            m = folium.Map(location=[centro.y, centro.x], zoom_start=13)
+
+            folium.GeoJson(
+                gdf,
+                name="Camada",
+                tooltip=folium.GeoJsonTooltip(
+                    fields=list(gdf.columns),
+                    aliases=[f"{col}:" for col in gdf.columns],
+                    sticky=True
+                )
+            ).add_to(m)
+
             st.subheader("🗺️ Mapa Interativo")
-            st_folium(m, width=900, height=600)
-        except Exception as e:
-            st.error(f"Erro ao gerar o mapa: {e}")
+            st_data = st_folium(m, width=900, height=600)
+    except Exception as e:
+        st.error(f"Erro ao processar o arquivo: {e}")
 
